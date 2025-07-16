@@ -10,7 +10,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios'); // Pastikan axios sudah diinstal
+const axios = require('axios');
 
 const app = express();
 app.use(bodyParser.json());
@@ -19,6 +19,8 @@ app.use(bodyParser.json());
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (!GEMINI_API_KEY) {
     console.error('ERROR: GEMINI_API_KEY not found in environment variables!');
+    // Penting: Di Vercel, ini akan menjadi fatal jika tidak disetel.
+    // Jika tidak ada, bot tidak akan berfungsi dengan AI.
 }
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-pro" });
@@ -81,114 +83,156 @@ async function sendQrCodeToTelegram(qrCodeText) {
     }
 }
 
-// --- Inisialisasi WhatsApp Client ---
-let client;
+// --- Variabel Global untuk Klien WhatsApp dan Status ---
+let client = null; // Inisialisasi sebagai null
 let isClientReady = false;
 let currentQrCode = null; // Variabel untuk menyimpan QR Code terbaru
 
-const initializeWhatsappClient = () => {
+// Map untuk menyimpan status sesi per instance fungsi (usaha terbatas di serverless)
+// Ini TIDAK akan sepenuhnya persisten antar cold starts atau scale-out
+const sessionMap = new Map(); // Untuk menyimpan status 'qr_received', 'ready' per instance fungsi
+
+// Fungsi untuk menginisialisasi klien WhatsApp
+// Fungsi ini akan dipanggil saat dibutuhkan
+const initializeWhatsappClient = async () => {
+    // Hindari inisialisasi ganda jika klien sudah ada atau sedang diproses
     if (client && isClientReady) {
-        console.log('Klien WhatsApp sudah siap dan berjalan.');
+        console.log('Klien WhatsApp sudah siap atau sedang berjalan.');
         return;
     }
 
-    console.log('Menginisialisasi klien WhatsApp...');
-    client = new Client({
-        authStrategy: new LocalAuth({ clientId: 'vercel-whatsapp-bot' }), // Memberi ID unik untuk auth
-        puppeteer: {
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
-            headless: true, // Pastikan ini true di Vercel
-        }
-    });
+    if (sessionMap.get('initializing')) {
+        console.log('Klien WhatsApp sudah dalam proses inisialisasi. Tunggu...');
+        return;
+    }
 
-    client.on('qr', qr => {
-        console.log('QR RECEIVED', qr);
-        qrcode.generate(qr, { small: true });
-        currentQrCode = qr; // Simpan QR Code terbaru
-        console.log('QR Code tersedia. Kunjungi /api/qr_page untuk melihatnya atau kirim ke Telegram.');
-    });
+    sessionMap.set('initializing', true); // Set flag sedang inisialisasi
+    console.log('Memulai inisialisasi klien WhatsApp...');
 
-    client.on('ready', () => {
-        console.log('Client is ready!');
-        isClientReady = true;
-        currentQrCode = null; // Hapus QR setelah terhubung
-    });
-
-    client.on('message', async msg => {
-        console.log('Pesan Diterima:', msg.body);
-
-        // Abaikan pesan dari bot itu sendiri atau dari status broadcast
-        if (msg.fromMe || msg.isStatus) {
-            return;
-        }
-
-        const lowerCaseBody = msg.body.toLowerCase();
-
-        if (lowerCaseBody.startsWith('!produk ')) {
-            const query = msg.body.substring(8).trim();
-            const foundProducts = searchProduct(query);
-            await msg.reply(formatProductList(foundProducts));
-        } else if (lowerCaseBody === '!help') {
-            await msg.reply(
-                "👋 Halo! Saya adalah bot toko online Anda.\n\n" +
-                "Anda bisa bertanya tentang produk dengan format: `!produk [nama produk]`\n" +
-                "Contoh: `!produk kemeja`\n\n" +
-                "Untuk pertanyaan umum, Anda bisa langsung ketik pertanyaan Anda, saya akan coba jawab dengan AI.\n" +
-                "Coba tanyakan: `Bagaimana cara merawat sepatu?`"
-            );
-        } else {
-            // Pertanyaan umum, gunakan Gemini AI
-            try {
-                // Berikan konteks ke Gemini untuk respons yang lebih baik
-                const prompt = `Anda adalah asisten AI yang ramah dan informatif untuk toko online. Fokus pada bantuan terkait produk kami atau pertanyaan umum yang relevan. Jika pertanyaan tidak jelas atau terlalu pribadi, Anda bisa menolak dengan sopan.
-                
-                Daftar Produk (untuk referensi, jangan selalu sebutkan semua):
-                - Kemeja Pria Casual: Rp 125.000, stok 50, Kemeja katun berkualitas.
-                - Celana Jeans Slim Fit: Rp 250.000, stok 30, Jeans denim elastis.
-                - Sepatu Sneakers Sporty: Rp 300.000, stok 20, Sepatu ringan dan fleksibel.
-                - Tas Ransel Laptop: Rp 180.000, stok 15, Tas multifungsi.
-                - Jam Tangan Digital: Rp 95.000, stok 40, Jam tangan tahan air.
-
-                Pertanyaan Pengguna: "${msg.body}"`;
-
-                const result = await model.generateContent(prompt);
-                const response = await result.response;
-                const text = response.text();
-                await msg.reply(text);
-                console.log('Respons Gemini:', text);
-            } catch (error) {
-                console.error('ERROR: Gagal memanggil Gemini API:', error);
-                await msg.reply('Maaf, ada masalah saat memproses permintaan Anda dengan AI. Silakan coba lagi nanti.');
+    try {
+        client = new Client({
+            // LocalAuth akan menyimpan sesi di folder .wwebjs_auth
+            // Di Vercel, ini bersifat non-persisten, jadi QR mungkin akan sering diminta
+            authStrategy: new LocalAuth({ clientId: 'vercel-whatsapp-bot' }),
+            puppeteer: {
+                // Konfigurasi Puppeteer untuk lingkungan serverless
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-gpu',
+                    '--disable-dev-shm-usage', // Penting untuk memori di lingkungan terbatas
+                    '--single-process',       // Mungkin membantu di lingkungan serverless
+                    '--no-zygote'             // Mungkin membantu di lingkungan serverless
+                ],
+                headless: true // Pastikan ini true untuk headless environment
             }
-        }
-    });
+        });
 
-    client.on('disconnected', (reason) => {
-        console.log('Client was disconnected', reason);
-        isClientReady = false;
-        // Mungkin perlu mencoba inisialisasi ulang jika terputus
-        // initializeWhatsappClient(); // Hati-hati dengan loop tak terbatas jika koneksi terus-menerus gagal
-    });
+        client.on('qr', qr => {
+            console.log('QR RECEIVED', qr);
+            qrcode.generate(qr, { small: true });
+            currentQrCode = qr; // Simpan QR Code terbaru
+            isClientReady = false; // Klien belum siap, masih butuh QR
+            sessionMap.set('qr_received', true); // Set status QR diterima
+            sessionMap.set('initializing', false); // Selesai inisialisasi, sekarang menunggu QR
+            console.log('QR Code tersedia. Kunjungi /api/qr_display atau kirim ke Telegram.');
+        });
 
-    client.initialize().catch(err => {
-        console.error('ERROR: Gagal menginisialisasi WhatsApp Client:', err);
+        client.on('ready', () => {
+            console.log('Client is ready!');
+            isClientReady = true;
+            currentQrCode = null; // Hapus QR setelah terhubung
+            sessionMap.set('qr_received', false);
+            sessionMap.set('initializing', false);
+            sessionMap.set('client_ready', true);
+        });
+
+        client.on('message', async msg => {
+            console.log('Pesan Diterima:', msg.body);
+
+            // Abaikan pesan dari bot itu sendiri atau dari status broadcast
+            if (msg.fromMe || msg.isStatus) {
+                return;
+            }
+
+            const lowerCaseBody = msg.body.toLowerCase();
+
+            if (lowerCaseBody.startsWith('!produk ')) {
+                const query = msg.body.substring(8).trim();
+                const foundProducts = searchProduct(query);
+                await msg.reply(formatProductList(foundProducts));
+            } else if (lowerCaseBody === '!help') {
+                await msg.reply(
+                    "👋 Halo! Saya adalah bot toko online Anda.\n\n" +
+                    "Anda bisa bertanya tentang produk dengan format: `!produk [nama produk]`\n" +
+                    "Contoh: `!produk kemeja`\n\n" +
+                    "Untuk pertanyaan umum, Anda bisa langsung ketik pertanyaan Anda, saya akan coba jawab dengan AI.\n" +
+                    "Coba tanyakan: `Bagaimana cara merawat sepatu?`"
+                );
+            } else {
+                // Pertanyaan umum, gunakan Gemini AI
+                try {
+                    const prompt = `Anda adalah asisten AI yang ramah dan informatif untuk toko online. Fokus pada bantuan terkait produk kami atau pertanyaan umum yang relevan. Jika pertanyaan tidak jelas atau terlalu pribadi, Anda bisa menolak dengan sopan.
+                    
+                    Daftar Produk (untuk referensi, jangan selalu sebutkan semua):
+                    - Kemeja Pria Casual: Rp 125.000, stok 50, Kemeja katun berkualitas.
+                    - Celana Jeans Slim Fit: Rp 250.000, stok 30, Jeans denim elastis.
+                    - Sepatu Sneakers Sporty: Rp 300.000, stok 20, Sepatu ringan dan fleksibel.
+                    - Tas Ransel Laptop: Rp 180.000, stok 15, Tas multifungsi.
+                    - Jam Tangan Digital: Rp 95.000, stok 40, Jam tangan tahan air.
+
+                    Pertanyaan Pengguna: "${msg.body}"`;
+
+                    const result = await model.generateContent(prompt);
+                    const response = await result.response;
+                    const text = response.text();
+                    await msg.reply(text);
+                    console.log('Respons Gemini:', text);
+                } catch (error) {
+                    console.error('ERROR: Gagal memanggil Gemini API:', error);
+                    await msg.reply('Maaf, ada masalah saat memproses permintaan Anda dengan AI. Silakan coba lagi nanti.');
+                }
+            }
+        });
+
+        client.on('disconnected', (reason) => {
+            console.log('Client was disconnected', reason);
+            isClientReady = false;
+            currentQrCode = null; // Sesi putus, QR mungkin diperlukan lagi
+            sessionMap.clear(); // Hapus semua status sesi
+            // initializeWhatsappClient(); // Hati-hati, ini bisa memicu loop jika terus putus
+        });
+
+        await client.initialize();
+        console.log('WhatsApp Client initialization process started.');
+
+    } catch (err) {
+        console.error('FATAL ERROR: Gagal menginisialisasi WhatsApp Client:', err.message);
         isClientReady = false;
-    });
+        currentQrCode = null;
+        sessionMap.clear();
+        // Penting: Jangan terus-menerus mencoba inisialisasi di sini jika gagal,
+        // karena bisa menyebabkan Vercel timeout atau loop tak terbatas.
+    } finally {
+        // sessionMap.delete('initializing'); // Hapus flag setelah proses init selesai
+    }
 };
 
 // Panggil inisialisasi klien saat aplikasi dimulai (untuk Vercel Cold Start)
 // Ini akan memastikan klien mencoba inisialisasi saat fungsi pertama kali aktif
-initializeWhatsappClient();
+initializeWhatsappClient(); // Panggil sekali saat Vercel instance 'bangun'
 
 // --- Endpoint HTTP untuk Vercel Serverless Function ---
 
 // Endpoint utama (halaman pilihan UI/UX)
 app.get('/api', (req, res) => {
-    // Basic health check for Vercel to keep the instance warm
-    if (!isClientReady) {
-        console.log('Client not ready. Re-initializing...');
-        // initializeWhatsappClient(); // Already called once on cold start, might not need to re-call here
+    // Vercel akan secara periodik memanggil endpoint ini untuk 'menghidupkan' fungsi.
+    // Jika klien belum siap, coba inisialisasi lagi (jika belum dalam proses)
+    if (!isClientReady && !sessionMap.get('initializing') && !sessionMap.get('qr_received')) {
+        console.log('Client not ready and not initializing. Attempting re-initialization...');
+        initializeWhatsappClient();
     }
+
     res.send(`
         <!DOCTYPE html>
         <html lang="en">
