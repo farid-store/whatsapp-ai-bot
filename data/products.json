@@ -1,0 +1,23 @@
+[
+    {
+        "id": "P001",
+        "name": "Kemeja Pria Casual",
+        "price": 125000,
+        "stock": 50,
+        "description": "Kemeja katun berkualitas tinggi, cocok untuk acara santai."
+    },
+    {
+        "id": "P002",
+        "name": "Celana Jeans Slim Fit",
+        "price": 250000,
+        "stock": 30,
+        "description": "Jeans denim elastis, nyaman dan fashionable."
+    },
+    {
+        "id": "P003",
+        "name": "Sepatu Sneakers Sporty",
+        "price": 300000,
+        "stock": 20,
+        "description": "Sepatu ringan dan fleksibel untuk aktivitas sehari-hari."
+    }
+]
