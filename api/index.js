@@ -31,9 +31,16 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 
 // Inisialisasi Bot Telegram
+// Pastikan TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID sudah disetel di Vercel Environment Variables
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+// Pastikan token ada sebelum membuat instance bot
+if (!TELEGRAM_BOT_TOKEN) {
+    console.error("TELEGRAM_BOT_TOKEN is not set. Please set it in your Vercel Environment Variables.");
+    process.exit(1); // Hentikan proses jika token tidak ada
+}
 const telegramBot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+
 
 // Variabel global untuk menyimpan instance klien WhatsApp dan QR code
 // Ini akan di-reset setiap kali fungsi Vercel di-invoke (karena stateless)
@@ -42,8 +49,7 @@ let whatsappClient = null;
 let qrCodeData = null; // Untuk menyimpan QR code terakhir yang dihasilkan
 let clientStatus = 'idle'; // idle, connecting, ready, disconnected
 
-// --- Custom Firestore Session Store (Adaptasi dari wwebjs-mongo) ---
-// Ini adalah implementasi RemoteAuth yang akan berinteraksi dengan Firestore
+// --- Custom Firestore Session Store ---
 class FirestoreStore {
     constructor(firestoreDb, collectionName = 'whatsapp_sessions') {
         this.db = firestoreDb;
@@ -92,7 +98,9 @@ const store = new FirestoreStore(db);
 
 // --- Fungsi untuk Menginisialisasi Klien WhatsApp ---
 const initializeWhatsAppClient = async () => {
-    if (whatsappClient && clientStatus !== 'disconnected') {
+    // Memeriksa apakah klien sudah dalam keadaan 'ready' atau 'connecting'
+    // agar tidak menginisialisasi ulang jika sudah berjalan
+    if (whatsappClient && (clientStatus === 'ready' || clientStatus === 'connecting')) {
         console.log('Klien WhatsApp sudah berjalan atau dalam proses.');
         return;
     }
@@ -103,7 +111,10 @@ const initializeWhatsAppClient = async () => {
     whatsappClient = new Client({
         authStrategy: new RemoteAuth({
             clientId: 'whatsapp-bot', // ID unik untuk sesi ini
-            store: store
+            store: store,
+            // --- INI REVISI UTAMA ---
+            // Menambahkan properti backupSyncIntervalMs dengan nilai yang valid (>= 60000ms)
+            backupSyncIntervalMs: 60000 // Sinkronkan sesi setiap 1 menit
         }),
         puppeteer: {
             headless: true, // Jalankan browser dalam mode headless (tanpa GUI)
@@ -128,8 +139,12 @@ const initializeWhatsAppClient = async () => {
             const buffer = Buffer.from(qrImageBase64.split(',')[1], 'base64');
 
             // Kirim QR code ke Telegram
-            await telegramBot.sendPhoto(TELEGRAM_CHAT_ID, buffer, { caption: 'Scan QR ini untuk menghubungkan WhatsApp Anda.' });
-            console.log('QR code berhasil dikirim ke Telegram.');
+            if (TELEGRAM_CHAT_ID) { // Pastikan ID chat ada sebelum mengirim
+                await telegramBot.sendPhoto(TELEGRAM_CHAT_ID, buffer, { caption: 'Scan QR ini untuk menghubungkan WhatsApp Anda.' });
+                console.log('QR code berhasil dikirim ke Telegram.');
+            } else {
+                console.warn('TELEGRAM_CHAT_ID is not set. QR code will not be sent to Telegram.');
+            }
         } catch (error) {
             console.error('Gagal mengirim QR code ke Telegram:', error);
         }
@@ -162,6 +177,7 @@ const initializeWhatsAppClient = async () => {
     });
 
     // Contoh pendengar pesan (ini hanya akan berfungsi selama fungsi Vercel aktif)
+    // Ingat: fungsi Vercel akan berakhir. Ini tidak akan mendengarkan secara real-time.
     whatsappClient.on('message', message => {
         console.log('Pesan diterima:', message.body);
         if (message.body === '!ping') {
@@ -193,6 +209,8 @@ app.get('/api/start-whatsapp', async (req, res) => {
     }
 
     // Panggil fungsi inisialisasi
+    // Penting: Pastikan ini dipanggil dan menyelesaikan eksekusi dalam batas waktu Vercel.
+    // Ini bukan jaminan bot akan terus berjalan.
     initializeWhatsAppClient();
 
     res.status(200).json({
