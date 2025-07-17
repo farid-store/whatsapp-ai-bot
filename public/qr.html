@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scan QR WhatsApp Bot</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #f0f2f5;
+            color: #333;
+            text-align: center;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .container {
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            max-width: 500px;
+            width: 100%;
+        }
+        h1 {
+            color: #25D366; /* Warna WhatsApp */
+            margin-bottom: 20px;
+        }
+        #qr-code-img {
+            width: 250px;
+            height: 250px;
+            border: 2px solid #eee;
+            border-radius: 8px;
+            object-fit: contain; /* Memastikan gambar QR muat dengan baik */
+            margin-bottom: 20px;
+        }
+        #status-message {
+            margin-top: 15px;
+            font-size: 1.1em;
+            color: #555;
+        }
+        .loading-spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #25D366;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .instructions {
+            font-size: 0.9em;
+            color: #777;
+            margin-top: 20px;
+        }
+        .note {
+            font-size: 0.8em;
+            color: #999;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Scan QR WhatsApp Anda</h1>
+        <div id="qr-code-placeholder" class="loading-spinner"></div>
+        <img id="qr-code-img" src="" alt="QR Code" style="display: none;">
+        <p id="status-message">Memuat QR code...</p>
+        <div class="instructions">
+            <p>1. Buka aplikasi WhatsApp di ponsel Anda.</p>
+            <p>2. Pergi ke **Pengaturan** (Settings) > **Perangkat Tertaut** (Linked Devices).</p>
+            <p>3. Ketuk **Tautkan Perangkat** (Link a Device) dan pindai QR code di atas.</p>
+        </div>
+        <p class="note">Catatan: Jika QR code tidak muncul dalam 30-60 detik, coba **refresh halaman ini**. Bot perlu diinisialisasi ulang di server.</p>
+    </div>
+
+    <script>
+        const qrCodeImg = document.getElementById('qr-code-img');
+        const qrCodePlaceholder = document.getElementById('qr-code-placeholder');
+        const statusMessage = document.getElementById('status-message');
+        const qrApiUrl = '/api/qr'; // Endpoint untuk mendapatkan QR code
+        const startApiUrl = '/api/start-whatsapp'; // Endpoint untuk memulai inisialisasi
+
+        let qrCheckInterval;
+        const QR_CHECK_INTERVAL_MS = 5000; // Cek setiap 5 detik
+
+        // Fungsi untuk memulai inisialisasi WhatsApp
+        async function initiateWhatsAppClient() {
+            statusMessage.textContent = 'Memulai inisialisasi klien WhatsApp di server...';
+            qrCodePlaceholder.style.display = 'block';
+            qrCodeImg.style.display = 'none'; // Sembunyikan gambar QR lama
+
+            try {
+                const response = await fetch(startApiUrl);
+                const data = await response.json();
+                console.log('Start API response:', data);
+                if (data.status === 'initializing' || data.status === 'connecting') {
+                    statusMessage.textContent = 'Klien WhatsApp sedang diinisialisasi. Menunggu QR code...';
+                    startQrPolling(); // Mulai polling QR jika inisialisasi dimulai
+                } else if (data.status === 'ready') {
+                    statusMessage.textContent = 'Klien WhatsApp sudah terhubung! Tidak ada QR code yang diperlukan.';
+                    qrCodePlaceholder.style.display = 'none';
+                    qrCodeImg.style.display = 'none';
+                    clearInterval(qrCheckInterval); // Hentikan polling
+                } else {
+                    statusMessage.textContent = 'Terjadi masalah saat memulai inisialisasi.';
+                    qrCodePlaceholder.style.display = 'none';
+                    clearInterval(qrCheckInterval); // Hentikan polling
+                }
+            } catch (error) {
+                console.error('Error calling start API:', error);
+                statusMessage.textContent = 'Gagal terhubung ke server. Coba refresh halaman.';
+                qrCodePlaceholder.style.display = 'none';
+                clearInterval(qrCheckInterval); // Hentikan polling
+            }
+        }
+
+        // Fungsi untuk memeriksa dan menampilkan QR code
+        async function checkQrCode() {
+            try {
+                const response = await fetch(qrApiUrl);
+                // Cek tipe konten
+                const contentType = response.headers.get("content-type");
+
+                if (response.ok && contentType && contentType.includes("image/png")) {
+                    // Jika respons adalah gambar QR code
+                    const blob = await response.blob();
+                    const imageUrl = URL.createObjectURL(blob);
+                    qrCodeImg.src = imageUrl;
+                    qrCodeImg.style.display = 'block'; // Tampilkan gambar QR
+                    qrCodePlaceholder.style.display = 'none'; // Sembunyikan spinner
+                    statusMessage.textContent = 'QR Code sudah tersedia! Segera pindai.';
+                    // Kita tidak menghentikan interval, karena sesi mungkin putus dan QR baru dibutuhkan
+                    // Namun, di aplikasi nyata, Anda bisa menghentikannya setelah status menjadi "ready"
+                } else {
+                    const text = await response.text();
+                    console.log('QR API response (text):', text);
+                    if (text.includes("Klien WhatsApp sudah terhubung")) {
+                        statusMessage.textContent = 'Klien WhatsApp sudah terhubung! Tidak ada QR code yang diperlukan.';
+                        qrCodePlaceholder.style.display = 'none';
+                        qrCodeImg.style.display = 'none';
+                        clearInterval(qrCheckInterval); // Hentikan polling jika sudah terhubung
+                    } else if (text.includes("QR code akan segera muncul")) {
+                        statusMessage.textContent = 'QR code sedang dibuat, harap tunggu...';
+                        qrCodePlaceholder.style.display = 'block'; // Tetap tampilkan spinner
+                        qrCodeImg.style.display = 'none';
+                    } else if (text.includes("Tidak ada QR code yang tersedia. Silakan panggil /api/start-whatsapp terlebih dahulu.")) {
+                        // Jika server bilang belum ada QR dan perlu panggil start
+                        statusMessage.textContent = 'Belum ada QR code. Memulai kembali inisialisasi...';
+                        qrCodePlaceholder.style.display = 'block';
+                        qrCodeImg.style.display = 'none';
+                        initiateWhatsAppClient(); // Panggil ulang start
+                    } else {
+                        statusMessage.textContent = 'Gagal memuat QR code. Coba refresh halaman.';
+                        qrCodePlaceholder.style.display = 'none';
+                        qrCodeImg.style.display = 'none';
+                        clearInterval(qrCheckInterval); // Hentikan polling jika ada error tak terduga
+                    }
+                }
+            } catch (error) {
+                console.error('Error checking QR code:', error);
+                statusMessage.textContent = 'Gagal terhubung ke server QR. Coba refresh halaman.';
+                qrCodePlaceholder.style.display = 'none';
+                qrCodeImg.style.display = 'none';
+                clearInterval(qrCheckInterval); // Hentikan polling jika ada error jaringan
+            }
+        }
+
+        function startQrPolling() {
+            // Hentikan interval lama jika ada
+            if (qrCheckInterval) {
+                clearInterval(qrCheckInterval);
+            }
+            // Mulai polling baru
+            qrCheckInterval = setInterval(checkQrCode, QR_CHECK_INTERVAL_MS);
+            // Panggil sekali langsung saat dimulai
+            checkQrCode();
+        }
+
+        // Ketika halaman dimuat, mulai inisialisasi dan polling
+        document.addEventListener('DOMContentLoaded', () => {
+            initiateWhatsAppClient();
+        });
+
+        // Pastikan polling berhenti jika pengguna meninggalkan halaman
+        window.addEventListener('beforeunload', () => {
+            if (qrCheckInterval) {
+                clearInterval(qrCheckInterval);
+            }
+        });
+    </script>
+</body>
+</html>
