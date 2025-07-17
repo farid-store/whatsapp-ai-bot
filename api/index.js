@@ -9,8 +9,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const qrcode = require('qrcode');
 const { Client, RemoteAuth } = require('whatsapp-web.js');
-const { MongoStore } = require('wwebjs-mongo'); // Menggunakan MongoStore sebagai contoh, tapi kita akan adaptasi untuk Firestore
-const { Collection } = require('mongodb'); // Hanya untuk tipe, tidak akan digunakan secara langsung
+
 const TelegramBot = require('node-telegram-bot-api');
 const admin = require('firebase-admin');
 
