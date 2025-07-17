@@ -6,8 +6,8 @@
       "use": "@vercel/node"
     },
     {
-      "src": "public/qr.html", // Tambahkan ini
-      "use": "@vercel/static" // Menggunakan builder untuk file statis
+      "src": "public/qr.html", 
+      "use": "@vercel/static" 
     }
   ],
   "routes": [
@@ -16,8 +16,8 @@
       "dest": "/api/index.js"
     },
     {
-      "src": "/qr", // URL yang akan kamu akses untuk halaman QR
-      "dest": "/public/qr.html" // Arahkan ke file HTML kamu
+      "src": "/qr", 
+      "dest": "/public/qr.html" 
     }
   ]
 }
